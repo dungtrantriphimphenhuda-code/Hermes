@@ -83,12 +83,18 @@ def chat(req: ChatRequest, x_chat_password: str | None = Header(default=None)):
     _check_password(x_chat_password)
     history = _sessions.setdefault(req.session_id, [])
 
-    agent = _build_agent()
     start = time.time()
-    result = agent.run_conversation(req.message, conversation_history=history)
+    try:
+        agent = _build_agent()
+        result = agent.run_conversation(req.message, conversation_history=history)
+        reply = result.get("final_response") or "(không có phản hồi)"
+    except Exception as exc:  # noqa: BLE001 - hiển thị lỗi thật để debug từ xa
+        import traceback
+
+        traceback.print_exc()
+        reply = f"[LỖI SERVER — gửi dòng này cho người debug]\n{type(exc).__name__}: {exc}"
     elapsed = time.time() - start
 
-    reply = result.get("final_response") or "(không có phản hồi)"
     history.extend(
         [
             {"role": "user", "content": req.message},
