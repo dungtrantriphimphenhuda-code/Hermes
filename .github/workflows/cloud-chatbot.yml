@@ -67,13 +67,7 @@ jobs:
           mkdir -p ~/llama-bin
           api="https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
           asset_url=$(curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "$api" \
-            | python3 -c "
-import json, re, sys
-data = json.load(sys.stdin)
-assets = [a['browser_download_url'] for a in data['assets']]
-pick = [u for u in assets if re.search(r'ubuntu-x64\.(zip|tar\.gz)$', u) and 'sycl' not in u and 'vulkan' not in u]
-print(pick[0] if pick else '')
-")
+            | python3 cloud_chat/pick_llama_asset.py)
           if [ -z "$asset_url" ]; then echo "Khong tim thay asset ubuntu-x64 phu hop"; exit 1; fi
           echo "Dang tai: $asset_url"
           curl -sSL "$asset_url" -o ~/llama-bin/pkg
@@ -135,15 +129,8 @@ print(pick[0] if pick else '')
           set -euo pipefail
           pw=$(cat /tmp/chat_password.txt)
           now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          python3 -c "
-import json
-json.dump({
-    'url': '${TUNNEL_URL}',
-    'password': '${pw}',
-    'updated_at': '${now}',
-    'note': 'Link doi moi ~6h/lan. Luon xem trang nay de lay link + mat khau moi nhat.'
-}, open('docs/status.json', 'w'), ensure_ascii=False, indent=2)
-"
+          TUNNEL_URL="${TUNNEL_URL}" CHAT_PW="${pw}" UPDATED_AT="${now}" \
+            python3 cloud_chat/write_status.py
           {
             echo "### 🤖 Hermes Cloud Chatbot"
             echo "- URL: ${TUNNEL_URL}"
