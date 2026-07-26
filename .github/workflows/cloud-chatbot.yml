@@ -1,0 +1,171 @@
+name: Hermes Cloud Chatbot
+
+# Chạy Hermes Agent như một chatbot web, "miễn phí mãi mãi" trên GitHub Actions:
+#   - Model: Gemma 4 (bản GGUF lượng tử hoá QAT của unsloth, KHÔNG cần HF token
+#     vì repo unsloth là public/ungated) chạy bằng llama-server (CPU, không cần GPU).
+#   - Backend: AIAgent thật của Hermes (đầy đủ tool-calling) trỏ vào llama-server
+#     local thay vì API trả phí -> không cần bất kỳ API key nào.
+#   - Frontend: cloud_chat/server.py (FastAPI, 1 trang chat đơn giản).
+#   - Public URL: Cloudflare Quick Tunnel (miễn phí, không cần tài khoản Cloudflare).
+#
+# GIỚI HẠN CẦN BIẾT:
+#   - GitHub-hosted runner có trần cứng 6 giờ/job -> job tự dừng trước mốc đó,
+#     scheduler sẽ tự khởi động lại job kế tiếp. Mỗi lần khởi động lại,
+#     link Cloudflare Quick Tunnel sẽ đổi (vài giây gián đoạn khi chuyển giao).
+#   - Link hiện tại + mật khẩu luôn được cập nhật vào docs/status.json và hiển
+#     thị qua trang GitHub Pages (docs/index.html) -> bookmark trang Pages,
+#     KHÔNG bookmark link trycloudflare.com trực tiếp.
+#   - Nếu muốn link cố định vĩnh viễn, cần một domain riêng + Cloudflare Tunnel
+#     có tên (named tunnel) thay vì quick tunnel -- xem ghi chú cuối file.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # tự khởi động lại mỗi 6 giờ
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # để commit docs/status.json (link + mật khẩu mới nhất)
+
+concurrency:
+  group: hermes-cloud-chatbot
+  cancel-in-progress: true
+
+env:
+  GGUF_REPO: "unsloth/gemma-4-E4B-it-qat-GGUF"
+  GGUF_QUANT: "UD-Q4_K_XL"        # QAT + Q4 dynamic: nhỏ nhưng vẫn mạnh, hợp RAM runner (~7GB)
+  JOB_BUDGET_MINUTES: "345"       # dừng chủ động trước trần 360 phút của GitHub
+
+jobs:
+  serve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache llama.cpp binary + model GGUF
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/llama.cpp
+            ~/llama-bin
+          key: llama-${{ env.GGUF_REPO }}-${{ env.GGUF_QUANT }}-v1
+
+      - name: Cài Hermes Agent + web server
+        run: |
+          pip install -e .
+          pip install -r cloud_chat/requirements.txt
+
+      - name: Tải llama-server (bản dựng sẵn, CPU, không cần token)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/llama-bin
+          api="https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+          asset_url=$(curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "$api" \
+            | python3 -c "
+import json, re, sys
+data = json.load(sys.stdin)
+assets = [a['browser_download_url'] for a in data['assets']]
+pick = [u for u in assets if re.search(r'ubuntu-x64\.(zip|tar\.gz)$', u) and 'sycl' not in u and 'vulkan' not in u]
+print(pick[0] if pick else '')
+")
+          if [ -z "$asset_url" ]; then echo "Khong tim thay asset ubuntu-x64 phu hop"; exit 1; fi
+          echo "Dang tai: $asset_url"
+          curl -sSL "$asset_url" -o ~/llama-bin/pkg
+          cd ~/llama-bin
+          if [[ "$asset_url" == *.zip ]]; then unzip -oq pkg; else tar -xzf pkg; fi
+          find ~/llama-bin -name "llama-server" -exec chmod +x {} \;
+
+      - name: Khởi động llama-server (Gemma 4, local, không cần token)
+        run: |
+          set -euo pipefail
+          bin=$(find ~/llama-bin -name "llama-server" | head -1)
+          "$bin" \
+            -hf "${GGUF_REPO}:${GGUF_QUANT}" \
+            --host 127.0.0.1 --port 8080 \
+            --ctx-size 8192 --jinja \
+            > ~/llama-server.log 2>&1 &
+          echo "Cho llama-server san sang..."
+          for i in $(seq 1 120); do
+            if curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; then
+              echo "llama-server da san sang."; exit 0
+            fi
+            sleep 5
+          done
+          echo "llama-server khong san sang sau 10 phut, xem log:"; cat ~/llama-server.log; exit 1
+
+      - name: Sinh mật khẩu & khởi động chatbot web (FastAPI)
+        run: |
+          set -euo pipefail
+          export CHAT_PASSWORD=$(python3 -c "import secrets;print(secrets.token_urlsafe(9))")
+          echo "CHAT_PASSWORD=$CHAT_PASSWORD" >> "$GITHUB_ENV"
+          echo "$CHAT_PASSWORD" > /tmp/chat_password.txt
+          nohup python3 cloud_chat/server.py > ~/chatbot.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
+              echo "chatbot server san sang."; exit 0
+            fi
+            sleep 2
+          done
+          echo "chatbot server khong san sang, log:"; cat ~/chatbot.log; exit 1
+
+      - name: Cài cloudflared & mở tunnel công khai
+        run: |
+          set -euo pipefail
+          curl -sSL -o /usr/local/bin/cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x /usr/local/bin/cloudflared
+          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8000 \
+            > ~/tunnel.log 2>&1 &
+          echo "Cho tunnel URL..."
+          for i in $(seq 1 60); do
+            url=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" ~/tunnel.log | head -1 || true)
+            if [ -n "${url:-}" ]; then echo "TUNNEL_URL=$url" >> "$GITHUB_ENV"; echo "Tunnel: $url"; exit 0; fi
+            sleep 2
+          done
+          echo "Khong lay duoc tunnel URL, log:"; cat ~/tunnel.log; exit 1
+
+      - name: Cập nhật docs/status.json + GitHub Step Summary
+        run: |
+          set -euo pipefail
+          pw=$(cat /tmp/chat_password.txt)
+          now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          python3 -c "
+import json
+json.dump({
+    'url': '${TUNNEL_URL}',
+    'password': '${pw}',
+    'updated_at': '${now}',
+    'note': 'Link doi moi ~6h/lan. Luon xem trang nay de lay link + mat khau moi nhat.'
+}, open('docs/status.json', 'w'), ensure_ascii=False, indent=2)
+"
+          {
+            echo "### 🤖 Hermes Cloud Chatbot"
+            echo "- URL: ${TUNNEL_URL}"
+            echo "- Mật khẩu: \`${pw}\`"
+            echo "- Cập nhật lúc: ${now} UTC"
+          } >> "$GITHUB_STEP_SUMMARY"
+          git config user.name "hermes-cloud-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add docs/status.json
+          git commit -m "chore: cập nhật link chatbot [skip ci]" || echo "Khong co gi thay doi"
+          git push
+
+      - name: Giữ job sống (agent phục vụ chat) đến gần mốc 6 giờ
+        run: |
+          budget_seconds=$(( ${JOB_BUDGET_MINUTES} * 60 ))
+          echo "Phuc vu chat trong toi da ${JOB_BUDGET_MINUTES} phut..."
+          sleep "$budget_seconds"
+
+# GHI CHÚ — muốn có link web CỐ ĐỊNH (không đổi mỗi 6h):
+#   1. Mua/sở hữu 1 domain, bật Cloudflare cho domain đó (miễn phí).
+#   2. Tạo "named tunnel" (cloudflared tunnel create ...), lưu credentials.json
+#      dạng base64 vào GitHub Secret (vd CF_TUNNEL_CREDS), route DNS tới domain con.
+#   3. Thay bước "cloudflared tunnel --url ..." bằng
+#      "cloudflared tunnel run --token <token đã lưu bí mật>" — lúc đó domain
+#      không đổi qua mỗi lần restart, chỉ có vài giây gián đoạn khi chuyển giao.

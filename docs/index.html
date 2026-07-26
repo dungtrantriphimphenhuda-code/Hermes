@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hermes Cloud Chatbot — trạng thái</title>
+<style>
+  body { font-family: system-ui, sans-serif; background:#0b0d12; color:#e8e8ec; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
+  .card { max-width: 480px; padding: 28px; border:1px solid #2a2e3a; border-radius:16px; background:#12141b; }
+  h1 { font-size:18px; margin-top:0; }
+  a.btn { display:inline-block; margin-top:14px; padding:12px 20px; background:#2a5adf; color:#fff; text-decoration:none; border-radius:10px; font-weight:600; }
+  code { background:#1b1e27; padding:2px 8px; border-radius:6px; }
+  .muted { opacity:.65; font-size:13px; margin-top:16px; }
+  #err { color:#f88; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>🤖 Hermes Cloud Chatbot</h1>
+    <div id="body">Đang tải trạng thái…</div>
+    <p class="muted">Link tự đổi mới mỗi ~6 giờ (giới hạn của GitHub Actions). Luôn quay lại trang này để lấy link + mật khẩu mới nhất — đừng bookmark thẳng link trycloudflare.com.</p>
+  </div>
+<script>
+fetch('./status.json?_=' + Date.now())
+  .then(r => r.json())
+  .then(d => {
+    document.getElementById('body').innerHTML = `
+      <p>Cập nhật lúc: <b>${d.updated_at}</b> (UTC)</p>
+      <p>Mật khẩu: <code>${d.password}</code></p>
+      <a class="btn" href="${d.url}" target="_blank" rel="noopener">Mở Chatbot →</a>
+    `;
+  })
+  .catch(() => {
+    document.getElementById('body').innerHTML = '<p id="err">Chưa có phiên nào chạy, hoặc GitHub Pages chưa build xong. Hãy chạy workflow "Hermes Cloud Chatbot" (tab Actions) rồi tải lại trang này.</p>';
+  });
+</script>
+</body>
+</html>
